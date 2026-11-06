@@ -190,5 +190,12 @@ bool Navigation_IsMazeCompleted(void);
  */
 const NavigationState_t* Navigation_GetState(void);
 
+/**
+ * @brief Imprime via Serial o estado atual de navegação: coordenadas (x, y),
+ *        orientação global (N, L, S, O), estado da Frente Virtual (inverted_front)
+ *        e leituras brutas/booleanas dos 4 sensores FC-51.
+ */
+void Navigation_PrintTelemetry(void);
+
 #endif /* NAVIGATION_H_ */
 

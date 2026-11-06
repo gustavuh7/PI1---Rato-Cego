@@ -54,3 +54,8 @@ int16_t getErroSensores(void)
 
     return erro;
 }
+
+void printSensores(void)
+{
+    Navigation_PrintTelemetry();
+}

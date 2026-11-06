@@ -29,6 +29,7 @@ const int16_t CENTRO_TRASEIRO_FIS = (ADC_REF_REAR_MIN + ADC_REF_REAR_MAX)  / 2; 
 // =============================================================================
 uint8_t getSensoresParede(void);
 int16_t getErroSensores(void);
+void printSensores(void);
 
 // Variáveis globais atualizadas com os valores virtuais (relativos à frente ativa)
 extern int16_t sensor_frontal_virtual;

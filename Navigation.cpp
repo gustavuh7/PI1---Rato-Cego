@@ -383,3 +383,24 @@ const NavigationState_t* Navigation_GetState(void)
     return &g_nav;
 }
 
+void Navigation_PrintTelemetry(void)
+{
+    static const char* HEADING_NAMES[4] = { "NORTE", "LESTE", "SUL", "OESTE" };
+    VirtualSensors_t v;
+    Navigation_ReadVirtualSensors(&v);
+
+    Serial.printf("[NAV] Pos:(%2d,%2d) Alvo:(%2d,%2d) | Dir:%-5s | FrenteInv:%s | "
+                  "Virt[E:%4u(%d) F:%4u(%d) D:%4u(%d) T:%4u(%d)] Mask:0b%d%d%d\n",
+                  g_nav.x, g_nav.y,
+                  g_nav.target_x, g_nav.target_y,
+                  HEADING_NAMES[g_nav.heading % 4],
+                  g_nav.inverted_front ? "SIM (TRASEIRA)" : "NAO (FRONTAL)",
+                  v.raw_left,  v.wall_left  ? 1 : 0,
+                  v.raw_front, v.wall_front ? 1 : 0,
+                  v.raw_right, v.wall_right ? 1 : 0,
+                  v.raw_rear,  v.wall_rear  ? 1 : 0,
+                  (v.wall_mask >> 2) & 1,
+                  (v.wall_mask >> 1) & 1,
+                  v.wall_mask & 1);
+}
+

@@ -1,8 +1,13 @@
 /**
- * @file umart_ino_seguidor_parede.cpp
- * @brief Loop principal do robô Micromouse Bidirecional no ESP32.
+ * @file PI1---Rato-Cego.ino
+ * @brief Sketch principal (Arduino IDE) do robô Micromouse Bidirecional no ESP32.
  *        Utiliza a arquitetura de Frente Virtual (`Navigation.h` / `Navigation.cpp`),
  *        mapeamento matricial 18x18 e algoritmo Seguidor de Parede Esquerda sem giro de 180°.
+ *
+ * Como abrir na Arduino IDE:
+ * 1. Abra o arquivo `PI1---Rato-Cego.ino` na Arduino IDE 2.x.
+ * 2. Selecione a placa: Tools -> Board -> esp32 -> "ESP32 Dev Module" (ou sua placa ESP32).
+ * 3. Selecione a porta COM e clique em Verify / Upload.
  */
 
 #include "umart_ino_seguidor_parede.h"
@@ -77,6 +82,9 @@ void loop(void)
         return;
     }
 
+    // Imprime telemetria dos sensores virtuais e coordenadas no Serial Monitor
+    Navigation_PrintTelemetry();
+
     // Executa um ciclo completo de navegação celular:
     // - Leitura dos 4 sensores FC-51 mapeados pela Frente Virtual (`inverted_front`)
     // - Atualização das paredes e visitação na matriz `maze[18][18]`
@@ -100,3 +108,4 @@ void callbackTimerControle(void)
         setMotores(0, 0);
     }
 }
+

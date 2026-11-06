@@ -4,7 +4,7 @@ Firmware refatorado a partir do projeto `umart_ino_seguidor_parede` (Micromouse 
 
 ## Especificações de Hardware
 
-- **Microcontrolador:** ESP32 (Framework Arduino / PlatformIO)
+- **Microcontrolador:** ESP32 (Arduino IDE 2.x - pacote `esp32:esp32`)
 - **Driver de Motores:** Ponte H Dupla MX1508 (Motor Esquerdo `U3` e Motor Direito `U6`)
 - **PWM Inicial de Operação:** 75% Duty Cycle (`191 / 255`)
 - **Encoders:** Quadratura (~580 a 600 pulsos/volta, nominal `590 PPR`)
@@ -30,5 +30,5 @@ Devido às dimensões físicas do chassi em relação à célula de `16,5 cm`, o
 - `motores.h` / `motores.cpp`: Acionamento PWM do driver MX1508 e espelhamento de tração `setMotoresVirtual()`.
 - `sensores.h` / `sensores.cpp`: Leitura dos 4 sensores FC-51 e cálculo do erro de alinhamento lateral virtual.
 - `controlador.h` / `controlador.cpp`: Leitura de encoders quadratura via ISR (`IRAM_ATTR`), odometria em mm/graus e controle PD de velocidade.
-- `umart_ino_seguidor_parede.h` / `umart_ino_seguidor_parede.cpp`: Inicialização (`setup`), timer periódico de controle (`10 ms`) e loop principal (`loop`).
-- `platformio.ini`: Configuração pronta para compilação no PlatformIO (`esp32dev`).
+- `umart_ino_seguidor_parede.h`: Cabeçalho de configuração geral do robô.
+- `PI1---Rato-Cego.ino`: Sketch principal para a **Arduino IDE** (`setup`, timer periódico de `10 ms` e `loop`).

@@ -194,6 +194,13 @@ void controladorPID(void)
 
 bool isFinalMovimento(void)
 {
+    // Interrompe imediatamente qualquer movimento se o usuário clicou em PARAR ou concluiu o labirinto
+    if (!Navigation_IsRunning() || Navigation_IsMazeCompleted())
+    {
+        setMotores(0, 0);
+        return true;
+    }
+
     if (tipo_movimento == TRANSLACIONAL && abs(distancia_mm) >= setpoint_dist)
     {
         return true;

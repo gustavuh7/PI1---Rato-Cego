@@ -14,14 +14,15 @@
 #include "sensores.h"
 #include "controlador.h"
 #include "Navigation.h"
+#include "WebInterface.h"
 
 // =============================================================================
 // PINOS DE INTERFACE DE USUÁRIO NO ESP32
 // =============================================================================
-#define LED_STATUS      2   // LED onboard do ESP32 (indica conclusão do labirinto)
-#define SW_START        0   // Botão BOOT/SW1 para início ou seleção de canto inicial
+#define LED_STATUS      2   // LED onboard do ESP32 (indica status e conclusão do labirinto)
+#define SW_START        0   // Botão físico BOOT (GPIO 0) para Iniciar / Parar de emergência
 
-// Configuração padrão do labirinto (pode ser ajustada para qualquer MxM <= 18)
+// Configuração padrão do labirinto (pode ser alterada na Interface Visual Web)
 #define DEFAULT_MAZE_DIMENSION  18
 #define DEFAULT_START_CORNER    START_BOTTOM_LEFT
 

@@ -120,10 +120,14 @@ void Navigation_Init(StartCorner_t corner, uint8_t effective_maze_size, Heading_
         effective_maze_size = MAZE_MAX_SIZE;
     }
 
-    g_nav.maze_size      = effective_maze_size;
-    g_nav.heading        = initial_heading;
-    g_nav.inverted_front = false; // Inicia com a frente física ativa (GPIO 34)
-    g_nav.maze_completed = false;
+    g_nav.maze_size            = effective_maze_size;
+    g_nav.start_corner         = corner;
+    g_nav.heading              = initial_heading;
+    g_nav.inverted_front       = false; // Inicia com a frente física ativa (GPIO 34)
+    g_nav.is_running           = false; // Aguarda comando de início (Web UI ou botão físico)
+    g_nav.first_half_cell_done = false;
+    g_nav.maze_completed       = false;
+    g_nav.last_action          = ACTION_IDLE;
 
     // Limpa a matriz 18x18 e configura as bordas externas do labirinto
     for (uint8_t x = 0; x < MAZE_MAX_SIZE; x++)
@@ -289,6 +293,15 @@ RobotAction_t Navigation_DecideNextAction(const VirtualSensors_t* v_sensors)
 
 void Navigation_ExecuteAction(RobotAction_t action)
 {
+    if (!g_nav.is_running)
+    {
+        resetControlador();
+        setMotores(0, 0);
+        return;
+    }
+
+    g_nav.last_action = action;
+
     // A camada de controle de motores e encoders lê `Navigation_IsFrontInverted()`
     // através de `setMotoresVirtual` / `frente` / `curva`, garantindo que:
     // - Quando `inverted_front == true`, o avanço linear inverta o sentido de rotação
@@ -298,19 +311,19 @@ void Navigation_ExecuteAction(RobotAction_t action)
         case ACTION_FORWARD:
             // Avança 1 célula (165 mm) mantendo a frente virtual atual
             frente(CELL_SIZE_MM);
-            advanceCoordinatesOneCell();
+            if (g_nav.is_running) advanceCoordinatesOneCell();
             break;
 
         case ACTION_TURN_LEFT:
             // Curva de +90° (Esquerda relativa à frente virtual) e avança até a fronteira
             curva(90);
-            advanceCoordinatesOneCell();
+            if (g_nav.is_running) advanceCoordinatesOneCell();
             break;
 
         case ACTION_TURN_RIGHT:
             // Curva de -90° (Direita relativa à frente virtual) e avança até a fronteira
             curva(-90);
-            advanceCoordinatesOneCell();
+            if (g_nav.is_running) advanceCoordinatesOneCell();
             break;
 
         case ACTION_INVERT_AND_EXIT:
@@ -321,12 +334,13 @@ void Navigation_ExecuteAction(RobotAction_t action)
             setMotores(0, 0);
             delay(100);
             frente(CELL_SIZE_MM);
-            advanceCoordinatesOneCell();
+            if (g_nav.is_running) advanceCoordinatesOneCell();
             break;
 
         case ACTION_STOP_VICTORY:
         case ACTION_IDLE:
         default:
+            g_nav.is_running = false;
             resetControlador();
             setMotores(0, 0);
             break;
@@ -335,10 +349,19 @@ void Navigation_ExecuteAction(RobotAction_t action)
 
 void Navigation_Step(void)
 {
-    if (g_nav.maze_completed)
+    if (!g_nav.is_running || g_nav.maze_completed)
     {
         setMotores(0, 0);
         return;
+    }
+
+    // Na largada, o robô parte do centro da primeira célula e desloca meia célula (82,5 mm)
+    // até a fronteira onde as leituras e decisões de célula ocorrem.
+    if (!g_nav.first_half_cell_done)
+    {
+        frente(CELL_SIZE_MM / 2);
+        if (!g_nav.is_running) return;
+        g_nav.first_half_cell_done = true;
     }
 
     // 1. Lê sensores já mapeados para a frente virtual ativa
@@ -352,6 +375,7 @@ void Navigation_Step(void)
     if (g_nav.x == g_nav.target_x && g_nav.y == g_nav.target_y)
     {
         g_nav.maze_completed = true;
+        g_nav.is_running     = false;
         Navigation_ExecuteAction(ACTION_STOP_VICTORY);
         return;
     }
@@ -364,8 +388,29 @@ void Navigation_Step(void)
     if (g_nav.x == g_nav.target_x && g_nav.y == g_nav.target_y)
     {
         g_nav.maze_completed = true;
+        g_nav.is_running     = false;
         Navigation_ExecuteAction(ACTION_STOP_VICTORY);
     }
+}
+
+bool Navigation_IsRunning(void)
+{
+    return g_nav.is_running && !g_nav.maze_completed;
+}
+
+void Navigation_Start(void)
+{
+    if (!g_nav.maze_completed)
+    {
+        g_nav.is_running = true;
+    }
+}
+
+void Navigation_Stop(void)
+{
+    g_nav.is_running = false;
+    resetControlador();
+    setMotores(0, 0);
 }
 
 bool Navigation_IsFrontInverted(void)
@@ -402,5 +447,53 @@ void Navigation_PrintTelemetry(void)
                   (v.wall_mask >> 2) & 1,
                   (v.wall_mask >> 1) & 1,
                   v.wall_mask & 1);
+}
+
+void Navigation_PrintMazeASCII(void)
+{
+    uint8_t M = g_nav.maze_size;
+    Serial.println("\n=== MAPA DO LABIRINTO REGISTRADO ===");
+
+    for (int8_t y = M - 1; y >= 0; y--)
+    {
+        // Linha das paredes Norte
+        for (uint8_t x = 0; x < M; x++)
+        {
+            Serial.print("+");
+            Serial.print((g_nav.maze[x][y] & MAZE_WALL_NORTH) ? "---" : "   ");
+        }
+        Serial.println("+");
+
+        // Linha das paredes Oeste/Leste e estado da célula
+        for (uint8_t x = 0; x < M; x++)
+        {
+            Serial.print((g_nav.maze[x][y] & MAZE_WALL_WEST) ? "|" : " ");
+            if (x == g_nav.x && y == g_nav.y)
+            {
+                Serial.print(" R ");
+            }
+            else if (x == g_nav.target_x && y == g_nav.target_y)
+            {
+                Serial.print(" G ");
+            }
+            else if (g_nav.maze[x][y] & MAZE_CELL_VISITED)
+            {
+                Serial.print(" . ");
+            }
+            else
+            {
+                Serial.print("   ");
+            }
+        }
+        Serial.println((g_nav.maze[M - 1][y] & MAZE_WALL_EAST) ? "|" : " ");
+    }
+
+    // Linha inferior das paredes Sul (y = 0)
+    for (uint8_t x = 0; x < M; x++)
+    {
+        Serial.print("+");
+        Serial.print((g_nav.maze[x][0] & MAZE_WALL_SOUTH) ? "---" : "   ");
+    }
+    Serial.println("+\n");
 }
 

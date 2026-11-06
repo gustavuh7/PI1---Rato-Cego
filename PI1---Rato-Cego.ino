@@ -2,12 +2,17 @@
  * @file PI1---Rato-Cego.ino
  * @brief Sketch principal (Arduino IDE) do robô Micromouse Bidirecional no ESP32.
  *        Utiliza a arquitetura de Frente Virtual (`Navigation.h` / `Navigation.cpp`),
- *        mapeamento matricial 18x18 e algoritmo Seguidor de Parede Esquerda sem giro de 180°.
+ *        mapeamento matricial 18x18, algoritmo Seguidor de Parede Esquerda sem giro de 180°
+ *        e Interface Visual Web (`WebInterface.h` / `WebInterface.cpp`).
  *
- * Como abrir na Arduino IDE:
- * 1. Abra o arquivo `PI1---Rato-Cego.ino` na Arduino IDE 2.x.
- * 2. Selecione a placa: Tools -> Board -> esp32 -> "ESP32 Dev Module" (ou sua placa ESP32).
- * 3. Selecione a porta COM e clique em Verify / Upload.
+ * Modos de Início e Parada no Labirinto:
+ * 1. INTERFACE VISUAL WI-FI (Sem tocar no robô):
+ *    - Conecte o celular ou PC no Wi-Fi: "RatoCego-ESP32" (Senha: "12345678")
+ *    - Abra no navegador: http://192.168.4.1
+ *    - Use os botões "INICIAR ROBÔ", "PARAR AGORA" e "ZERAR MAPA", e acompanhe o mapa ao vivo.
+ * 2. BOTÃO FÍSICO BOOT DA ESP32 (GPIO 0):
+ *    - Robô parado: Pressione BOOT -> O LED pisca por 2 segundos (tempo para tirar a mão) e o robô inicia.
+ *    - Robô em movimento: Pressione BOOT -> Parada imediata dos motores.
  */
 
 #include "umart_ino_seguidor_parede.h"
@@ -16,8 +21,29 @@
 // VARIÁVEIS PRIVADAS
 // =============================================================================
 static Ticker s_timerControle;
-static volatile bool bRodarControle = false;
 static bool bSinalizouVitoria = false;
+static volatile bool s_btnBootPressed = false;
+static volatile uint32_t s_lastBtnIrqMs = 0;
+
+// Interrupção do botão físico BOOT (GPIO 0) para Parada Imediata ou Partida
+static void IRAM_ATTR isrBotaoBoot(void)
+{
+    uint32_t now = millis();
+    if ((now - s_lastBtnIrqMs) > 300)
+    {
+        s_lastBtnIrqMs = now;
+        if (Navigation_IsRunning())
+        {
+            // Se já estiver andando, para imediatamente!
+            Navigation_Stop();
+        }
+        else
+        {
+            // Se estiver parado, agenda partida com contagem regressiva de 2s
+            s_btnBootPressed = true;
+        }
+    }
+}
 
 // =============================================================================
 // INICIALIZAÇÃO DO SISTEMA (SETUP)
@@ -34,25 +60,20 @@ void setup(void)
     initMotores();
     initEncoders();
 
-    // 2. Seleciona o canto inicial:
-    //    - Padrão: Canto Inferior Esquerdo (0, 0) -> Alvo em (M-1, M-1)
-    //    - Se o botão SW_START estiver pressionado no boot: Canto Inferior Direito (M-1, 0) -> Alvo em (0, M-1)
-    StartCorner_t canto_inicial = (digitalRead(SW_START) == LOW)
-                                  ? START_BOTTOM_RIGHT
-                                  : DEFAULT_START_CORNER;
+    // 2. Inicializa camada de Frente Virtual, Sensores FC-51 (GPIOs 34, 35, 39, 36) e Matriz 18x18
+    //    Nota: O robô inicia no estado PARADO (is_running = false) aguardando comando!
+    Navigation_Init(DEFAULT_START_CORNER, DEFAULT_MAZE_DIMENSION, HEADING_NORTH);
 
-    // 3. Inicializa camada de Frente Virtual, Sensores FC-51 (GPIOs 34, 35, 39, 36) e Matriz 18x18
-    Navigation_Init(canto_inicial, DEFAULT_MAZE_DIMENSION, HEADING_NORTH);
+    // 3. Inicializa o Painel Visual Web via Wi-Fi Access Point (http://192.168.4.1)
+    WebInterface_Init();
 
-    Serial.println("[MICROMOUSE ESP32] Sistema inicializado. Aguardando partida...");
-    delay(2000);
+    // 4. Configura interrupção do botão físico BOOT (GPIO 0)
+    attachInterrupt(digitalPinToInterrupt(SW_START), isrBotaoBoot, FALLING);
 
-    // 4. Inicia o Timer periódico de controle de velocidade e leitura de sensores (a cada TS = 10 ms)
-    bRodarControle = true;
+    // 5. Inicia o Timer periódico de controle de velocidade e leitura de sensores (a cada TS = 10 ms)
     s_timerControle.attach_ms(TS, callbackTimerControle);
 
-    // 5. Desloca meia célula (82,5 mm) do centro da célula inicial até a fronteira da próxima célula
-    frente(CELULA / 2);
+    Serial.println("[MICROMOUSE ESP32] Pronto e aguardando comando de INICIO (Web UI http://192.168.4.1 ou Botao BOOT).");
 }
 
 // =============================================================================
@@ -60,18 +81,17 @@ void setup(void)
 // =============================================================================
 void loop(void)
 {
-    // Verifica condição de parada (chegada à célula diagonalmente oposta MxM)
+    // 1. Verifica condição de parada por Vitória (chegada à célula diagonalmente oposta MxM)
     if (Navigation_IsMazeCompleted())
     {
-        bRodarControle = false;
-        resetControlador();
-        setMotores(0, 0);
+        Navigation_Stop();
 
         if (!bSinalizouVitoria)
         {
             bSinalizouVitoria = true;
             const NavigationState_t* st = Navigation_GetState();
             Serial.printf("[VITORIA] Labirinto concluido na celula (%d, %d)!\n", st->x, st->y);
+            Navigation_PrintMazeASCII();
         }
 
         // Sinalização luminosa contínua indicando conclusão do labirinto
@@ -82,14 +102,36 @@ void loop(void)
         return;
     }
 
-    // Imprime telemetria dos sensores virtuais e coordenadas no Serial Monitor
-    Navigation_PrintTelemetry();
+    bSinalizouVitoria = false;
 
-    // Executa um ciclo completo de navegação celular:
-    // - Leitura dos 4 sensores FC-51 mapeados pela Frente Virtual (`inverted_front`)
-    // - Atualização das paredes e visitação na matriz `maze[18][18]`
-    // - Decisão Left-Hand Rule sem giro de 180° (inversão de frente virtual em becos sem saída)
-    // - Acionamento dos motores e atualização de coordenadas `(x, y)` e `heading`
+    // 2. Se o usuário apertou o botão físico BOOT (GPIO 0) com o robô parado:
+    //    Aguarda 2 segundos piscando o LED (para dar tempo de afastar a mão) e inicia!
+    if (s_btnBootPressed)
+    {
+        s_btnBootPressed = false;
+        Serial.println("[BOTAO BOOT] Iniciando em 2 segundos...");
+        for (int i = 0; i < 4; i++)
+        {
+            digitalWrite(LED_STATUS, HIGH);
+            delay(250);
+            digitalWrite(LED_STATUS, LOW);
+            delay(250);
+        }
+        Navigation_Start();
+    }
+
+    // 3. Se estiver aguardando início (parado), mantém motores desligados
+    if (!Navigation_IsRunning())
+    {
+        setMotores(0, 0);
+        digitalWrite(LED_STATUS, LOW);
+        delay(50);
+        return;
+    }
+
+    // 4. Robô em operação no labirinto: LED aceso e execução passo a passo celular
+    digitalWrite(LED_STATUS, HIGH);
+    Navigation_PrintTelemetry();
     Navigation_Step();
 }
 
@@ -98,7 +140,7 @@ void loop(void)
 // =============================================================================
 void callbackTimerControle(void)
 {
-    if (bRodarControle && !Navigation_IsMazeCompleted())
+    if (Navigation_IsRunning() && !Navigation_IsMazeCompleted())
     {
         getSensoresParede();
         controleVelocidade();
@@ -108,4 +150,3 @@ void callbackTimerControle(void)
         setMotores(0, 0);
     }
 }
-

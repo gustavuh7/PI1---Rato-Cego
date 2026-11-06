@@ -114,9 +114,13 @@ typedef struct {
     int8_t target_x;                // Coordenada X da célula alvo (diagonalmente oposta)
     int8_t target_y;                // Coordenada Y da célula alvo (diagonalmente oposta)
     uint8_t maze_size;              // Tamanho efetivo do grid (M <= 18)
+    StartCorner_t start_corner;     // Canto inicial configurado
     Heading_t heading;              // Orientação global absoluta (N, L, S, O)
     bool inverted_front;            // false = Frente Física (GPIO 34), true = Traseira Física (GPIO 35)
+    bool is_running;                // true = Robô em operação no labirinto, false = Parado/Aguardando
+    bool first_half_cell_done;      // Controla o avanço inicial de meia célula na largada
     bool maze_completed;            // Flag de vitória (labirinto concluído)
+    RobotAction_t last_action;      // Última ação executada pela máquina de estados
     uint8_t maze[MAZE_MAX_SIZE][MAZE_MAX_SIZE]; // Matriz de paredes e células visitadas
 } NavigationState_t;
 
@@ -176,6 +180,21 @@ void Navigation_ExecuteAction(RobotAction_t action);
 void Navigation_Step(void);
 
 /**
+ * @brief Retorna se o robô está em execução ativa no labirinto.
+ */
+bool Navigation_IsRunning(void);
+
+/**
+ * @brief Inicia ou retoma a execução do robô no labirinto.
+ */
+void Navigation_Start(void);
+
+/**
+ * @brief Para imediatamente os motores e pausa a navegação (Parada de Emergência).
+ */
+void Navigation_Stop(void);
+
+/**
  * @brief Retorna se a frente virtual está invertida (`true` = traseira física é a frente).
  */
 bool Navigation_IsFrontInverted(void);
@@ -196,6 +215,12 @@ const NavigationState_t* Navigation_GetState(void);
  *        e leituras brutas/booleanas dos 4 sensores FC-51.
  */
 void Navigation_PrintTelemetry(void);
+
+/**
+ * @brief Renderiza no Serial Monitor o mapa ASCII das paredes registradas
+ *        e células visitadas na matriz `maze[18][18]`.
+ */
+void Navigation_PrintMazeASCII(void);
 
 #endif /* NAVIGATION_H_ */
 

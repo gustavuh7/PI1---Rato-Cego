@@ -1,42 +1,33 @@
-/*
- * umart_ino_seguidor_parede.h
- *
- *  Created on: 30/06/2015
- *      Author: Kleber Lima da Silva (micromousebrasil@gmail.com)
+/**
+ * @file umart_ino_seguidor_parede.h
+ * @brief Cabeçalho principal do firmware Micromouse Bidirecional no ESP32
+ *        (Refatorado a partir de uMaRT-INO Seguidor de Parede).
  */
 
 #ifndef _umart_ino_seguidor_parede_H_
 #define _umart_ino_seguidor_parede_H_
 
-
-// Bibliotecas -----------------------------------------------------------------
-#include "Arduino.h"
-#include "TimerOne.h"
+#include <Arduino.h>
+#include <Ticker.h>
+#include <stdint.h>
 #include "motores.h"
 #include "sensores.h"
 #include "controlador.h"
-#include <stdint.h>
+#include "Navigation.h"
 
+// =============================================================================
+// PINOS DE INTERFACE DE USUÁRIO NO ESP32
+// =============================================================================
+#define LED_STATUS      2   // LED onboard do ESP32 (indica conclusão do labirinto)
+#define SW_START        0   // Botão BOOT/SW1 para início ou seleção de canto inicial
 
-// Definição dos pinos no modo MICROMOUSE --------------------------------------
-#define LED1 0		// LED1
-#define LED2  1		// LED2
-#define B_ENC_E 2	// Encoder do motor esquerdo (sinal B)
-#define A_ENC_D 3	// Encoder do motor direito (sinal A)
-#define A_ENC_E 4	// Encoder do motor esquerdo (sinal A)
-#define B_ENC_D 5	// Encoder do motor direito (sinal B)
-#define SW1 12		// Botão SW1
+// Configuração padrão do labirinto (pode ser ajustada para qualquer MxM <= 18)
+#define DEFAULT_MAZE_DIMENSION  18
+#define DEFAULT_START_CORNER    START_BOTTOM_LEFT
 
-
-// Constantes ------------------------------------------------------------------
-#define ESQUERDA 1
-#define DIREITA 2
-
-
-// Protótipo das Funções -------------------------------------------------------
+// Protótipos das Funções
 void setup(void);
 void loop(void);
-void callbackTimer1(void);
-
+void callbackTimerControle(void);
 
 #endif /* _umart_ino_seguidor_parede_H_ */

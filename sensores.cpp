@@ -1,106 +1,56 @@
-/*
- * sensores.cpp
- *
- *  Created on: 30/06/2015
- *      Author: Kleber Lima da Silva (micromousebrasil@gmail.com)
+/**
+ * @file sensores.cpp
+ * @brief Implementação da leitura dos 4 sensores FC-51 no ESP32 e cálculo de erro
+ *        de alinhamento lateral respeitando a frente virtual (`inverted_front`).
  */
 
 #include "sensores.h"
 
-// Variáveis Externas ----------------------------------------------------------
-int16_t frontal_esquerdo = 0;
-int16_t lateral_esquerdo = 0;
-int16_t lateral_direito = 0;
-int16_t frontal_direito = 0;
+// Variáveis externas com as leituras atuais já espelhadas pela Frente Virtual
+int16_t sensor_frontal_virtual  = 0;
+int16_t sensor_traseiro_virtual = 0;
+int16_t sensor_esquerdo_virtual = 0;
+int16_t sensor_direito_virtual  = 0;
 
+static VirtualSensors_t s_last_virtual_sensors;
 
-/* Função para leitura dos sensores de parede ----------------------------------
- * Atualiza as leituras dos sensores frontais e laterais.
- * Retorna uma máscara de bits indicando presença (1) ou não (0)
- * de paredes. O bit mais significativo representa a parede da
- * esquerda. Ex.: 011 = presença de parede frontal e direita.
- */
 uint8_t getSensoresParede(void)
 {
-	uint8_t paredes = 0;
+    uint8_t mask = Navigation_ReadVirtualSensors(&s_last_virtual_sensors);
 
-	frontal_esquerdo = analogRead(FE_RECEPTOR);
-	lateral_esquerdo = analogRead(LE_RECEPTOR);
-	lateral_direito = analogRead(LD_RECEPTOR);
-	frontal_direito = analogRead(FD_RECEPTOR);
+    sensor_frontal_virtual  = (int16_t)s_last_virtual_sensors.raw_front;
+    sensor_traseiro_virtual = (int16_t)s_last_virtual_sensors.raw_rear;
+    sensor_esquerdo_virtual = (int16_t)s_last_virtual_sensors.raw_left;
+    sensor_direito_virtual  = (int16_t)s_last_virtual_sensors.raw_right;
 
-	// Registra o tempo atual
-	uint32_t t0 = micros();
-
-	// Sensor frontal esquerdo
-	digitalWrite(FE_EMISSOR, HIGH);
-	while((micros() - t0) < 80);
-	frontal_esquerdo = analogRead(FE_RECEPTOR) - frontal_esquerdo;
-	digitalWrite(FE_EMISSOR, LOW);
-	if(frontal_esquerdo < 0) frontal_esquerdo = 0;
-	while((micros() - t0) < 160);
-
-	// Sensor frontal direito
-	digitalWrite(FD_EMISSOR, HIGH);
-	while((micros() - t0) < 240);
-	frontal_direito = analogRead(FD_RECEPTOR) - frontal_direito;
-	digitalWrite(FD_EMISSOR, LOW);
-	if(frontal_direito < 0) frontal_direito = 0;
-	while((micros() - t0) < 320);
-
-	// Sensores laterais
-	digitalWrite(L_EMISSORES, HIGH);
-	while((micros() - t0) < 400);
-	lateral_esquerdo = analogRead(LE_RECEPTOR) - lateral_esquerdo;
-	lateral_direito = analogRead(LD_RECEPTOR) - lateral_direito;
-	digitalWrite(L_EMISSORES, LOW);
-	if(lateral_esquerdo < 0) lateral_esquerdo = 0;
-	if(lateral_direito < 0) lateral_direito = 0;
-
-	// Realiza a máscara de bits
-	if(frontal_esquerdo > FRONTAL_TH || frontal_direito > FRONTAL_TH)
-	{
-		paredes |= 0b010;
-	}
-
-	if(lateral_esquerdo > LATERAL_TH)
-	{
-		paredes |= 0b100;
-	}
-
-	if(lateral_direito > LATERAL_TH)
-	{
-		paredes |= 0b001;
-	}
-
-	return paredes;
+    return mask;
 }
 
-
-/* Retorna o erro de alinhamento dos sensores ----------------------------------
- *
- */
 int16_t getErroSensores(void)
 {
-	int16_t erro = 0;
+    int16_t erro = 0;
+    bool inverted = Navigation_IsFrontInverted();
 
-	/* ------ ALINHAMENTO LATERAL ------ */
-	if (frontal_esquerdo < FRONTAL_TH && frontal_direito < FRONTAL_TH)
-	{
-		if (lateral_esquerdo > CENTRO_LATERAL && lateral_direito < CENTRO_LATERAL)
-		{
-			erro = lateral_esquerdo - CENTRO_LATERAL;
-		}
-		else if (lateral_direito > CENTRO_LATERAL && lateral_esquerdo < CENTRO_LATERAL)
-		{
-			erro = CENTRO_LATERAL - lateral_direito;
-		}
-	}
-	/* ------ ALINHAMENTO FRONTAL ------ */
-	else if (frontal_esquerdo > ALINHAMENTO_FRONTAL && frontal_direito > ALINHAMENTO_FRONTAL)
-	{
-		erro = (frontal_direito - frontal_esquerdo);
-	}
+    // Seleciona a referência nominal do centro para cada lateral conforme a frente virtual
+    int16_t ref_esq = inverted ? CENTRO_LATERAL_DIR : CENTRO_LATERAL_ESQ;
+    int16_t ref_dir = inverted ? CENTRO_LATERAL_ESQ : CENTRO_LATERAL_DIR;
 
-	return erro;
+    // Alinhamento lateral quando não há parede bloqueando a frente virtual
+    if (!s_last_virtual_sensors.wall_front)
+    {
+        if (s_last_virtual_sensors.wall_left && !s_last_virtual_sensors.wall_right)
+        {
+            erro = sensor_esquerdo_virtual - ref_esq;
+        }
+        else if (s_last_virtual_sensors.wall_right && !s_last_virtual_sensors.wall_left)
+        {
+            erro = ref_dir - sensor_direito_virtual;
+        }
+        else if (s_last_virtual_sensors.wall_left && s_last_virtual_sensors.wall_right)
+        {
+            erro = (sensor_esquerdo_virtual - ref_esq) - (sensor_direito_virtual - ref_dir);
+        }
+    }
+
+    return erro;
 }

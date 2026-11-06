@@ -1,238 +1,283 @@
-/*
- * controlador.cpp
- *
- *  Created on: 30/06/2015
- *      Author: Kleber Lima da Silva (micromousebrasil@gmail.com)
+/**
+ * @file controlador.cpp
+ * @brief Implementação do controle de velocidade PID, leitura de encoders quadratura
+ *        por interrupção no ESP32 e abstração cinemática bidirecional (`inverted_front`).
  */
 
 #include "controlador.h"
 
+// =============================================================================
+// VARIÁVEIS GLOBAIS E DE ESTADO DO CONTROLADOR
+// =============================================================================
+volatile int32_t distancia_mm  = 0;
+volatile int32_t distancia_deg = 0;
 
-// Variáveis Externas ----------------------------------------------------------
-int32_t distancia_mm = 0;
-int32_t distancia_deg = 0;
+// Contadores brutos dos encoders físicos (atualizados via ISR no ESP32)
+static volatile int32_t s_enc_esq_cnt = 0;
+static volatile int32_t s_enc_dir_cnt = 0;
 
-// Configuração dos Encoders ---------------------------------------------------
-Encoder encoder_esquerda(ENCODER_B_E, ENCODER_A_E);
-Encoder encoder_direita(ENCODER_A_D, ENCODER_B_D);
+// Variáveis internas do controlador PID
+static int8_t  tipo_movimento = TRANSLACIONAL;
+static int32_t setpoint_dist = 0;
+static int32_t setpoint_speed_esquerda_cnt = 0;
+static int32_t setpoint_speed_direita_cnt  = 0;
+static int32_t encoder_esquerda_delta = 0;
+static int32_t encoder_direita_delta  = 0;
+static int32_t encoder_esquerda_anterior_cnt = 0;
+static int32_t encoder_direita_anterior_cnt  = 0;
+static int32_t pid_esquerda_out = 0;
+static int32_t pid_direita_out  = 0;
+static int32_t erro_esquerda_anterior = 0;
+static int32_t erro_direita_anterior  = 0;
+static bool    bUsarSensores = false;
 
+// =============================================================================
+// INTERRUPÇÕES DOS ENCODERS QUADRATURA (ESP32 IRAM_ATTR)
+// =============================================================================
+static void IRAM_ATTR isrEncoderEsquerdaA(void)
+{
+    bool a = digitalRead(ENCODER_A_E);
+    bool b = digitalRead(ENCODER_B_E);
+    if (a == b) s_enc_esq_cnt++;
+    else        s_enc_esq_cnt--;
+}
 
-// Variáveis Privadas ----------------------------------------------------------
-int8_t tipo_movimento = 0;
-int32_t setpoint_dist = 0;
-int32_t setpoint_speed_esquerda_cnt = 0, setpoint_speed_direita_cnt = 0;
-int32_t encoder_esquerda_delta = 0, encoder_direita_delta = 0;
-int32_t encoder_esquerda_anterior_cnt = 0, encoder_direita_anterior_cnt = 0;
-int32_t pid_esquerda_out = 0, pid_direita_out = 0;
-int32_t erro_esquerda_anterior = 0, erro_direita_anterior = 0;
-bool bUsarSensores = false;
+static void IRAM_ATTR isrEncoderDireitaA(void)
+{
+    bool a = digitalRead(ENCODER_A_D);
+    bool b = digitalRead(ENCODER_B_D);
+    if (a != b) s_enc_dir_cnt++;
+    else        s_enc_dir_cnt--;
+}
 
+void initEncoders(void)
+{
+    pinMode(ENCODER_A_E, INPUT_PULLUP);
+    pinMode(ENCODER_B_E, INPUT_PULLUP);
+    pinMode(ENCODER_A_D, INPUT_PULLUP);
+    pinMode(ENCODER_B_D, INPUT_PULLUP);
 
+    attachInterrupt(digitalPinToInterrupt(ENCODER_A_E), isrEncoderEsquerdaA, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENCODER_A_D), isrEncoderDireitaA,  CHANGE);
+}
 
-/*******************************************************************************
- *Função principal do controle de velocidade -----------------------------------
- */
+int32_t lerEncoderEsquerdaFisico(void)
+{
+    return s_enc_esq_cnt;
+}
+
+int32_t lerEncoderDireitaFisico(void)
+{
+    return s_enc_dir_cnt;
+}
+
+void resetEncodersFisicos(void)
+{
+    noInterrupts();
+    s_enc_esq_cnt = 0;
+    s_enc_dir_cnt = 0;
+    interrupts();
+}
+
+// =============================================================================
+// MALHA DE CONTROLE DE VELOCIDADE E ODOMETRIA VIRTUAL
+// =============================================================================
+
 void controleVelocidade(void)
 {
-	updateEncoders();	// Updates the distance and speeds
-	controladorPID();		// Speed controller
+    updateEncoders();
+    controladorPID();
 }
 
-
-/* Função para selecionar os parâmetros do movimento ---------------------------
- * raio [mm]: 0 para movimento translacional ou raio para a curva
- * dist_ou_angulo [mm ou deg]: distância(translational ou angular) do movimento
- * speed [mm/s]: velocidade do movimento
- */
 void setMovimento(int32_t raio, int32_t dist_ou_angulo, int32_t speed)
 {
-	if (raio == 0)
-	{
-		tipo_movimento = TRANSLACIONAL;
+    if (raio == 0)
+    {
+        tipo_movimento = TRANSLACIONAL;
 
-		// Usado para o controle de velocidade
-		setpoint_speed_esquerda_cnt = SPEED_TO_COUNTS(speed);
-		setpoint_speed_direita_cnt = setpoint_speed_esquerda_cnt;
-	}
-	else
-	{
-		tipo_movimento = ROTACIONAL;
+        setpoint_speed_esquerda_cnt = SPEED_TO_COUNTS(speed);
+        setpoint_speed_direita_cnt  = setpoint_speed_esquerda_cnt;
 
-		// Calcula as velocidade a partir do raio
-		float speedX_mm_s = (float)speed;
-		float speedW_rad_s = speedX_mm_s / (float)raio;
+        // Pré-carrega o integrador PD com o PWM base de 75% duty cycle na direção do movimento
+        int16_t pwm_init = (speed >= 0) ? PWM_DUTY_75_PERCENT : -PWM_DUTY_75_PERCENT;
+        if (speed == 0) pwm_init = 0;
+        pid_esquerda_out = pwm_init;
+        pid_direita_out  = pwm_init;
+    }
+    else
+    {
+        tipo_movimento = ROTACIONAL;
 
-		int32_t speedX_cnt = SPEED_TO_COUNTS(abs(speed));
-		int32_t speedW_cnt = RAD_S_TO_COUNTS(speedW_rad_s);
+        float speedX_mm_s  = (float)speed;
+        float speedW_rad_s = speedX_mm_s / (float)raio;
 
-		if (raio < RODA_RODA)
-		{
-			speedX_cnt -= (abs(speedW_cnt) / 2);
-			speedW_cnt /= 2;
-		}
+        int32_t speedX_cnt = SPEED_TO_COUNTS(abs(speed));
+        int32_t speedW_cnt = RAD_S_TO_COUNTS(speedW_rad_s);
 
-		// Usado para o controle de velocidade
-		setpoint_speed_esquerda_cnt = speedX_cnt - speedW_cnt;
-		setpoint_speed_direita_cnt = speedX_cnt + speedW_cnt;
-	}
+        if (raio < RODA_RODA)
+        {
+            speedX_cnt -= (abs(speedW_cnt) / 2);
+            speedW_cnt /= 2;
+        }
 
-	setpoint_dist = dist_ou_angulo;	// Usado para indica o fim do movimento
+        setpoint_speed_esquerda_cnt = speedX_cnt - speedW_cnt;
+        setpoint_speed_direita_cnt  = speedX_cnt + speedW_cnt;
+
+        // Pré-carrega o PWM inicial de 75% nas rodas para o giro de 90°
+        pid_esquerda_out = (setpoint_speed_esquerda_cnt >= 0) ? PWM_DUTY_75_PERCENT : -PWM_DUTY_75_PERCENT;
+        pid_direita_out  = (setpoint_speed_direita_cnt  >= 0) ? PWM_DUTY_75_PERCENT : -PWM_DUTY_75_PERCENT;
+    }
+
+    setpoint_dist = dist_ou_angulo;
 }
 
-
-/* Atualiza a leitura dos encoders ---------------------------------------------
- */
 void updateEncoders(void)
 {
-	int32_t encoder_esquerda_cnt, encoder_direita_cnt;
+    int32_t phys_esq = lerEncoderEsquerdaFisico();
+    int32_t phys_dir = lerEncoderDireitaFisico();
 
-	// Atualiza a contagem dos encoders
-	encoder_esquerda_cnt = LER_ENCODER_E;
-	encoder_direita_cnt = LER_ENCODER_D;
+    int32_t virt_esq_cnt;
+    int32_t virt_dir_cnt;
 
-	// Atualiza a alteração dos encoders (speed)
-	encoder_esquerda_delta = encoder_esquerda_cnt - encoder_esquerda_anterior_cnt;
-	encoder_direita_delta = encoder_direita_cnt - encoder_direita_anterior_cnt;
+    // Espelha e inverte a leitura dos encoders quando `inverted_front == true`
+    if (!Navigation_IsFrontInverted())
+    {
+        virt_esq_cnt = phys_esq;
+        virt_dir_cnt = phys_dir;
+    }
+    else
+    {
+        virt_esq_cnt = -phys_dir;
+        virt_dir_cnt = -phys_esq;
+    }
 
-	// Guarda os valores anteriores
-	encoder_esquerda_anterior_cnt = encoder_esquerda_cnt;
-	encoder_direita_anterior_cnt = encoder_direita_cnt;
+    encoder_esquerda_delta = virt_esq_cnt - encoder_esquerda_anterior_cnt;
+    encoder_direita_delta  = virt_dir_cnt - encoder_direita_anterior_cnt;
 
-	// Calcula a distância (mm) e o ângulo (deg)
-	distancia_mm = COUNTS_TO_MM((encoder_direita_cnt + encoder_esquerda_cnt) / 2);
-	distancia_deg = COUNTS_TO_DEG((encoder_direita_cnt - encoder_esquerda_cnt) / 2);
+    encoder_esquerda_anterior_cnt = virt_esq_cnt;
+    encoder_direita_anterior_cnt  = virt_dir_cnt;
+
+    distancia_mm  = COUNTS_TO_MM((virt_dir_cnt + virt_esq_cnt) / 2);
+    distancia_deg = COUNTS_TO_DEG((virt_dir_cnt - virt_esq_cnt) / 2);
 }
 
-
-/* Controlador PID de velocidade dos motores -----------------------------------
- */
 void controladorPID(void)
 {
-	int32_t erro_esquerda = 0, erro_direita = 0;
+    int32_t erro_esquerda = 0;
+    int32_t erro_direita  = 0;
 
-	// Alinhamento através dos sensores
-	if (bUsarSensores == true)
-	{
-		int32_t sensor_feedback = (int32_t)getErroSensores() / K_SENSORES;
+    if (bUsarSensores)
+    {
+        int32_t sensor_feedback = (int32_t)getErroSensores() / K_SENSORES;
+        erro_esquerda += sensor_feedback;
+        erro_direita  -= sensor_feedback;
+    }
 
-		erro_esquerda += sensor_feedback;
-		erro_direita -= sensor_feedback;
-	}
+    erro_esquerda += (setpoint_speed_esquerda_cnt - encoder_esquerda_delta);
+    erro_direita  += (setpoint_speed_direita_cnt  - encoder_direita_delta);
 
-	// Erro de velocidade
-	erro_esquerda += (setpoint_speed_esquerda_cnt - encoder_esquerda_delta);
-	erro_direita += (setpoint_speed_direita_cnt - encoder_direita_delta);
+    pid_esquerda_out += (KP * erro_esquerda) + (KD * (erro_esquerda - erro_esquerda_anterior));
+    pid_direita_out  += (KP * erro_direita)  + (KD * (erro_direita  - erro_direita_anterior));
 
-	// PD - motor da esquerda
-	pid_esquerda_out += (KP * erro_esquerda) +
-			(KD * (erro_esquerda - erro_esquerda_anterior));
+    // Saturação do acumulador PID
+    if (pid_esquerda_out > PWM_MAX)  pid_esquerda_out = PWM_MAX;
+    if (pid_esquerda_out < -PWM_MAX) pid_esquerda_out = -PWM_MAX;
+    if (pid_direita_out > PWM_MAX)   pid_direita_out  = PWM_MAX;
+    if (pid_direita_out < -PWM_MAX)  pid_direita_out  = -PWM_MAX;
 
-	// PD - motor da direita
-	pid_direita_out += (KP * erro_direita) +
-				(KD * (erro_direita - erro_direita_anterior));
+    erro_esquerda_anterior = erro_esquerda;
+    erro_direita_anterior  = erro_direita;
 
-	// Guarda os valores anteriores
-	erro_esquerda_anterior = erro_esquerda;
-	erro_direita_anterior = erro_direita;
-
-	setMotores(pid_esquerda_out, pid_direita_out);
+    // Aciona os motores traduzindo pela camada de frente virtual (`inverted_front`)
+    setMotoresVirtual((int16_t)pid_esquerda_out, (int16_t)pid_direita_out, Navigation_IsFrontInverted());
 }
 
-
-/* Indica o fim do movimento ---------------------------------------------------
- */
 bool isFinalMovimento(void)
 {
-	if (tipo_movimento == TRANSLACIONAL && distancia_mm >= setpoint_dist)
-	{
-		return true;
-	}
-	else if (tipo_movimento == ROTACIONAL && abs(distancia_deg) >= setpoint_dist)
-	{
-		return true;
-	}
-	else if ((tipo_movimento == TRANSLACIONAL)
-			&& (frontal_esquerdo > CENTRO_FRONTAL && frontal_direito > CENTRO_FRONTAL))
-	{
-		return true;
-	}
+    if (tipo_movimento == TRANSLACIONAL && abs(distancia_mm) >= setpoint_dist)
+    {
+        return true;
+    }
+    else if (tipo_movimento == ROTACIONAL && abs(distancia_deg) >= setpoint_dist)
+    {
+        return true;
+    }
 
-	return false;
+    return false;
 }
 
-
-/* Reseta os encoders e as variáveis do controlador ----------------------------
- */
 void resetControlador(void)
 {
-	RESET_ENCODER_E;
-	RESET_ENCODER_D;
+    resetEncodersFisicos();
 
-	encoder_esquerda_anterior_cnt = 0;
-	encoder_direita_anterior_cnt = 0;
+    encoder_esquerda_anterior_cnt = 0;
+    encoder_direita_anterior_cnt  = 0;
+    encoder_esquerda_delta        = 0;
+    encoder_direita_delta         = 0;
 
-	distancia_mm = 0;
-	distancia_deg = 0;
+    distancia_mm  = 0;
+    distancia_deg = 0;
 
-	pid_esquerda_out = 0; pid_direita_out = 0;
-	erro_esquerda_anterior = 0; erro_direita_anterior = 0;
-	setpoint_speed_esquerda_cnt = 0; setpoint_speed_direita_cnt = 0;
+    pid_esquerda_out       = 0;
+    pid_direita_out        = 0;
+    erro_esquerda_anterior = 0;
+    erro_direita_anterior  = 0;
+
+    setpoint_speed_esquerda_cnt = 0;
+    setpoint_speed_direita_cnt  = 0;
 }
 
-
-/* Movimenta o micromouse para frente uma distância em [mm] --------------------
- * Se mm == 0: anda para frente até o próximo comando
- */
 void frente(int32_t mm)
 {
-	if (mm != 0)
-	{
-		bUsarSensores = true;
-		resetControlador();
-		setMovimento(0, mm, SPEED_RETA);
+    if (mm != 0)
+    {
+        bUsarSensores = true;
+        resetControlador();
+        setMovimento(0, mm, SPEED_RETA);
 
-		do
-		{
-			delay(1);
-		}
-		while (isFinalMovimento() == false);
-	}
-	else
-	{
-		bUsarSensores = true;
-		setMovimento(0, mm, SPEED_RETA);
-		delay(1);
-	}
+        do
+        {
+            delay(1);
+        } while (!isFinalMovimento());
+    }
+    else
+    {
+        bUsarSensores = true;
+        setMovimento(0, 0, SPEED_RETA);
+        delay(1);
+    }
 }
 
-
-/* Realiza uma curva em torno do próprio eixo (graus < 0: para direita) --------
- */
 void curvaPivot(int16_t graus)
 {
-	bUsarSensores = false;
-	resetControlador();
-	setMotores(0, 0);
-	delay(100);
+    bUsarSensores = false;
+    resetControlador();
+    setMotores(0, 0);
+    delay(100);
 
-	// Seleciona o movimento de acordo com o sentido da curva
-	if (graus > 0) setMovimento(RODA_RODA / 2, graus, SPEED_CURVA);
-	else setMovimento(RODA_RODA / 2, -graus, -SPEED_CURVA);
+    // Nota: Curvas permitidas são apenas de +90° (esquerda) ou -90° (direita).
+    // O giro de 180° foi eliminado pela arquitetura de Frente Virtual.
+    if (graus > 0)
+    {
+        setMovimento(RODA_RODA / 2, graus, SPEED_CURVA);
+    }
+    else
+    {
+        setMovimento(RODA_RODA / 2, -graus, -SPEED_CURVA);
+    }
 
-	do
-	{
-		delay(1);
-	}
-	while (isFinalMovimento() == false);
+    do
+    {
+        delay(1);
+    } while (!isFinalMovimento());
 }
 
-
-/* Realiza uma curva em torno do próprio eixo e anda até a fronteira da célula
- *		(graus < 0: para direita)
- */
 void curva(int16_t graus)
 {
-	frente(CELULA / 2);
-	curvaPivot(graus);
-	frente(CELULA / 2);
+    // Desloca meia célula até o centro da célula atual (na direção da frente virtual)
+    frente(CELULA / 2);
+    // Realiza apenas curva de 90° (+90° Esquerda ou -90° Direita)
+    curvaPivot(graus);
+    // Avança meia célula até a fronteira da próxima célula
+    frente(CELULA / 2);
 }

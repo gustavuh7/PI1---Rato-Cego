@@ -1,185 +1,102 @@
 /**
- *******************************************************************************
- * Arquivo  umart_ino_seguidor_parede.cpp
- * Autor    Kleber Lima da Silva (micromousebrasil@gmail.com)
- * Versão   V1.0.0
- * Data     30-Junho-2015
- * Resumo   Programa de demonstração do Robô uMaRT-INO no modo
- *         micromouse (algoritmo seguidor de parede)
- *******************************************************************************
+ * @file umart_ino_seguidor_parede.cpp
+ * @brief Loop principal do robô Micromouse Bidirecional no ESP32.
+ *        Utiliza a arquitetura de Frente Virtual (`Navigation.h` / `Navigation.cpp`),
+ *        mapeamento matricial 18x18 e algoritmo Seguidor de Parede Esquerda sem giro de 180°.
  */
 
-// Bibliotecas -----------------------------------------------------------------
 #include "umart_ino_seguidor_parede.h"
 
+// =============================================================================
+// VARIÁVEIS PRIVADAS
+// =============================================================================
+static Ticker s_timerControle;
+static volatile bool bRodarControle = false;
+static bool bSinalizouVitoria = false;
 
-// Variáveis do Privadas -------------------------------------------------------
-bool bRodarControle = false;
-uint8_t seguidor = 0;
-uint8_t paredes = 0;
-
-
-//#define USE_UART	// Comentar esta linha para usar os LEDs
-// Inicialização dos Periféricos -----------------------------------------------
-void setup()
+// =============================================================================
+// INICIALIZAÇÃO DO SISTEMA (SETUP)
+// =============================================================================
+void setup(void)
 {
-	pinMode(FE_RECEPTOR, INPUT);
-	pinMode(LE_RECEPTOR, INPUT);
-	pinMode(LD_RECEPTOR, INPUT);
-	pinMode(FD_RECEPTOR, INPUT);
-	pinMode(FE_EMISSOR, OUTPUT);
-	pinMode(L_EMISSORES, OUTPUT);
-	pinMode(FD_EMISSOR, OUTPUT);
-	pinMode(PWM_E, OUTPUT);
-	pinMode(IN1_E, OUTPUT);
-	pinMode(IN2_E, OUTPUT);
-	pinMode(PWM_D, OUTPUT);
-	pinMode(IN1_D, OUTPUT);
-	pinMode(IN2_D, OUTPUT);
-	pinMode(SW1, INPUT);
+    Serial.begin(115200);
 
-#ifdef USE_UART	// Inicialização para usar a UART
-	pinMode(0, INPUT);
-	pinMode(1, OUTPUT);
-	Serial.begin(115200);
-#else	// Inicialização para usar os LEDs
-	pinMode(LED1, OUTPUT);
-	pinMode(LED2, OUTPUT);
-	digitalWrite(LED1, LOW);
-	digitalWrite(LED2, LOW);
-#endif
+    pinMode(LED_STATUS, OUTPUT);
+    pinMode(SW_START, INPUT_PULLUP);
+    digitalWrite(LED_STATUS, LOW);
 
-	// Será habilitado seguidor de parede esquerda ou direita de acordo com o
-	// respectivo sensor frontal acionado
-	while ((getSensoresParede() & 0b010) == 0)
-	{
-		delay(100);
-	}
-	if (frontal_esquerdo > frontal_direito)
-	{
-		seguidor = ESQUERDA;
-	}
-	else
-	{
-		seguidor = DIREITA;
-	}
-	delay(2000);	// Aguarda um tempo para a partida do micromouse
+    // 1. Inicializa driver MX1508 (motores U3 e U6) e encoders em quadratura
+    initMotores();
+    initEncoders();
 
-	// Inicia o Timer do controle de velocidade
-	Timer1.initialize(TS * 1000);
-	Timer1.attachInterrupt(callbackTimer1);
-	bRodarControle = true;
+    // 2. Seleciona o canto inicial:
+    //    - Padrão: Canto Inferior Esquerdo (0, 0) -> Alvo em (M-1, M-1)
+    //    - Se o botão SW_START estiver pressionado no boot: Canto Inferior Direito (M-1, 0) -> Alvo em (0, M-1)
+    StartCorner_t canto_inicial = (digitalRead(SW_START) == LOW)
+                                  ? START_BOTTOM_RIGHT
+                                  : DEFAULT_START_CORNER;
 
-	// Ao iniciar o micromouse deve estar no centro da primeira célula...
-	// Com isso, deve se deslocar meia célula até a FRONTEIRA da próxima célula
-	// (local IDEAL para realizar a leitura dos sensores)
-	frente(CELULA / 2);
+    // 3. Inicializa camada de Frente Virtual, Sensores FC-51 (GPIOs 34, 35, 39, 36) e Matriz 18x18
+    Navigation_Init(canto_inicial, DEFAULT_MAZE_DIMENSION, HEADING_NORTH);
+
+    Serial.println("[MICROMOUSE ESP32] Sistema inicializado. Aguardando partida...");
+    delay(2000);
+
+    // 4. Inicia o Timer periódico de controle de velocidade e leitura de sensores (a cada TS = 10 ms)
+    bRodarControle = true;
+    s_timerControle.attach_ms(TS, callbackTimerControle);
+
+    // 5. Desloca meia célula (82,5 mm) do centro da célula inicial até a fronteira da próxima célula
+    frente(CELULA / 2);
 }
 
-
-// LOOP principal do programa --------------------------------------------------
-void loop()
+// =============================================================================
+// LOOP PRINCIPAL (MÁQUINA DE ESTADOS E MAPEAMENTO)
+// =============================================================================
+void loop(void)
 {
-	// Realiza a máquina de estados de acordo com o que foi selecionado
-	if (seguidor == DIREITA)
-	{
-		switch (paredes)	// Máquina de Estados - Seguidor de Parede DIREITA
-		{
-		// Sem paredes
-		case 0b000:
-			curva(-90);	// Vira para a direita
-			break;
+    // Verifica condição de parada (chegada à célula diagonalmente oposta MxM)
+    if (Navigation_IsMazeCompleted())
+    {
+        bRodarControle = false;
+        resetControlador();
+        setMotores(0, 0);
 
-		// Apenas parede da direita
-		case 0b001:
-			frente(CELULA);	// Anda uma célula para frente
-			break;
+        if (!bSinalizouVitoria)
+        {
+            bSinalizouVitoria = true;
+            const NavigationState_t* st = Navigation_GetState();
+            Serial.printf("[VITORIA] Labirinto concluido na celula (%d, %d)!\n", st->x, st->y);
+        }
 
-		// Apenas parede da esquerda
-		case 0b100:
-			curva(-90);	// Vira para a direita
-			break;
+        // Sinalização luminosa contínua indicando conclusão do labirinto
+        digitalWrite(LED_STATUS, HIGH);
+        delay(200);
+        digitalWrite(LED_STATUS, LOW);
+        delay(200);
+        return;
+    }
 
-		// Ambas paredes laterais
-		case 0b101:
-			frente(CELULA);	// Anda uma célula para frente
-			break;
-
-		// Apenas parede frontal
-		case 0b010:
-			curva(-90);	// Vira para a direita
-			break;
-
-		// Parede frontal e direita
-		case 0b011:
-			curva(90);	// Vira para a esquerda
-			break;
-
-		// Parede frontal e esquerda
-		case 0b110:
-			curva(-90);	// Vira para a direita
-			break;
-
-		// Todas as paredes
-		case 0b111:
-			curva(180);	// Meia volta
-			break;
-		}
-	}
-	else if (seguidor == ESQUERDA)
-	{
-		switch (paredes)	// Máquina de Estados - Seguidor de Parede ESQUERDA
-		{
-		// Sem paredes
-		case 0b000:
-			curva(90);	// Vira para esquerda
-			break;
-
-		// Apenas parede da direita
-		case 0b001:
-			curva(90);	// Vira para esquerda
-			break;
-
-		// Apenas parede da esquerda
-		case 0b100:
-			frente(CELULA);	// Anda uma célula para frente
-			break;
-
-		// Ambas paredes laterais
-		case 0b101:
-			frente(CELULA);	// Anda uma célula para frente
-			break;
-
-		// Apenas parede frontal
-		case 0b010:
-			curva(90);	// Vira para esquerda
-			break;
-
-		// Parede frontal e direita
-		case 0b011:
-			curva(90);	// Vira para a esquerda
-			break;
-
-		// Parede frontal e esquerda
-		case 0b110:
-			curva(-90);	// Vira para direita
-			break;
-
-		// Todas as paredes
-		case 0b111:
-			curva(-180);	// Meia volta
-			break;
-		}
-	}
+    // Executa um ciclo completo de navegação celular:
+    // - Leitura dos 4 sensores FC-51 mapeados pela Frente Virtual (`inverted_front`)
+    // - Atualização das paredes e visitação na matriz `maze[18][18]`
+    // - Decisão Left-Hand Rule sem giro de 180° (inversão de frente virtual em becos sem saída)
+    // - Acionamento dos motores e atualização de coordenadas `(x, y)` e `heading`
+    Navigation_Step();
 }
 
-
-// Callback do Timer 1 - Controle de Velocidade --------------------------------
-void callbackTimer1(void)
+// =============================================================================
+// CALLBACK DO TIMER DE CONTROLE (10 ms)
+// =============================================================================
+void callbackTimerControle(void)
 {
-	if (bRodarControle == true)
-	{
-		paredes = getSensoresParede();	// Realiza a leitura dos sensores
-		controleVelocidade();			// Realiza o controle de velocidade
-	}
+    if (bRodarControle && !Navigation_IsMazeCompleted())
+    {
+        getSensoresParede();
+        controleVelocidade();
+    }
+    else
+    {
+        setMotores(0, 0);
+    }
 }
